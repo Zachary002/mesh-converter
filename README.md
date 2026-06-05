@@ -46,6 +46,19 @@ If `python3 -c "import tkinter"` fails on your Homebrew Python, either:
 
 ## Install & run
 
+### Option A — download the prebuilt macOS app (arm64, no Python needed)
+
+1. Grab the latest `MeshConverter-macos-arm64.zip` from [Releases](https://github.com/Zachary002/mesh-converter/releases).
+2. Unzip — you get `Mesh Converter.app`. Drag it to `/Applications` (optional).
+3. **First launch**: macOS will say "cannot be opened because the developer cannot be verified" (the app isn't signed). Either:
+   - Right-click the app → **Open** → **Open** in the confirmation dialog, or
+   - Run once: `xattr -cr "/Applications/Mesh Converter.app"` then double-click.
+4. Install `assimp` if you haven't: `brew install assimp`. The app shows a warning in its log if it can't find it.
+
+The prebuilt is **macOS arm64 only** (Apple Silicon). Intel Macs / Linux / Windows: use Option B.
+
+### Option B — run from source
+
 ```sh
 git clone https://github.com/Zachary002/mesh-converter.git
 cd mesh-converter
@@ -56,6 +69,16 @@ python3 mesh_converter.py
 ```
 
 A window opens. That's it.
+
+### Building the .app yourself
+
+```sh
+/usr/bin/python3 -m venv .venv-build
+source .venv-build/bin/activate
+pip install pyinstaller
+pyinstaller --noconfirm --windowed --name "Mesh Converter" mesh_converter.py
+# result: dist/Mesh Converter.app
+```
 
 ---
 
@@ -126,6 +149,17 @@ MIT — see [LICENSE](LICENSE).
 - **assimp**：`brew install assimp`（mac）/ `apt install assimp-utils`（Debian/Ubuntu）/ [Windows release](https://github.com/assimp/assimp/releases)
 
 ## 安装运行
+
+### 方案 A：直接下载 mac 打包好的 .app（Apple Silicon arm64）
+
+1. 去 [Releases](https://github.com/Zachary002/mesh-converter/releases) 下载 `MeshConverter-macos-arm64.zip`
+2. 解压得到 `Mesh Converter.app`，拖进 `/Applications`（可选）
+3. **首次打开**：mac 会提示"无法验证开发者"。右键 → **打开** → 再点 **打开** 即可；或执行 `xattr -cr "/Applications/Mesh Converter.app"` 后再双击
+4. 装 assimp：`brew install assimp`。如果没装，App 启动后会在日志区提示
+
+只有 mac arm64 版本（Intel mac / Linux / Windows 请用方案 B）。
+
+### 方案 B：从源码运行
 
 ```sh
 git clone https://github.com/Zachary002/mesh-converter.git
