@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
-"""Simple drag-and-drop GUI to batch-convert 3D mesh files via assimp."""
+"""Modern drag-and-drop GUI to batch-convert 3D mesh files via assimp (PySide6)."""
 
 import os
 import shutil
 import subprocess
 import sys
-import threading
 from pathlib import Path
-from tkinter import Tk, ttk, filedialog, messagebox, StringVar, BooleanVar, END
-from tkinter.scrolledtext import ScrolledText
+
+from PySide6.QtCore import Qt, QThread, Signal, QUrl
+from PySide6.QtGui import QFont, QDragEnterEvent, QDropEvent
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+    QLabel, QFrame, QListWidget, QComboBox, QCheckBox, QFileDialog, QProgressBar,
+    QPlainTextEdit, QMessageBox, QSizePolicy,
+)
 
 OUTPUT_FORMATS = [
-    ("obj", "OBJ — universal, opens in mac QuickLook"),
+    ("obj", "OBJ — universal, opens in macOS QuickLook"),
     ("gltf2", "glTF 2.0 — modern web/AR standard"),
     ("stl", "STL — 3D printing"),
     ("ply", "PLY — point clouds / scans"),
@@ -25,187 +30,306 @@ INPUT_EXTS = ("fbx", "obj", "stl", "ply", "gltf", "glb", "dae", "3ds", "x3d", "b
 
 
 def find_assimp():
-    return shutil.which("assimp")
+    found = shutil.which("assimp")
+    if found:
+        return found
+    for p in ("/opt/homebrew/bin/assimp", "/usr/local/bin/assimp", "/usr/bin/assimp"):
+        if os.path.exists(p):
+            return p
+    return None
 
 
-class App:
-    def __init__(self, root):
-        self.root = root
-        root.title("Mesh Converter")
-        root.geometry("720x560")
+class DropZone(QFrame):
+    files_dropped = Signal(list)
 
-        self.assimp_path = find_assimp()
-        self.files = []
-        self.out_dir = StringVar(value="(same as input)")
-        self.fmt = StringVar(value=OUTPUT_FORMATS[0][0])
-        self.overwrite = BooleanVar(value=False)
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setMinimumHeight(140)
+        self.setStyleSheet("""
+            DropZone {
+                border: 2px dashed #888;
+                border-radius: 14px;
+                background: rgba(127,127,127,0.06);
+            }
+            DropZone[hover="true"] {
+                border-color: #2d7cf0;
+                background: rgba(45,124,240,0.10);
+            }
+        """)
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignCenter)
+        big = QLabel("Drop 3D files here")
+        big.setAlignment(Qt.AlignCenter)
+        f = QFont()
+        f.setPointSize(18)
+        f.setBold(True)
+        big.setFont(f)
+        sub = QLabel("FBX / OBJ / STL / glTF / PLY / DAE / 3DS / X3D  —  or click to browse")
+        sub.setAlignment(Qt.AlignCenter)
+        sub.setStyleSheet("color: #777;")
+        layout.addWidget(big)
+        layout.addWidget(sub)
+        self.setProperty("hover", False)
 
-        self._build_ui()
+    def mousePressEvent(self, _):
+        # Click-to-browse fallback
+        self.files_dropped.emit([])  # special signal: empty list = open dialog
 
-        if not self.assimp_path:
-            self.log("⚠ assimp not found. Install it first:  brew install assimp")
-            self.convert_btn.config(state="disabled")
-        else:
-            self.log(f"assimp: {self.assimp_path}")
+    def dragEnterEvent(self, e: QDragEnterEvent):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+            self.setProperty("hover", True)
+            self.style().unpolish(self); self.style().polish(self)
 
-    def _build_ui(self):
-        pad = {"padx": 8, "pady": 4}
+    def dragLeaveEvent(self, _):
+        self.setProperty("hover", False)
+        self.style().unpolish(self); self.style().polish(self)
 
-        top = ttk.Frame(self.root)
-        top.pack(fill="x", **pad)
-        ttk.Button(top, text="Add files…", command=self.add_files).pack(side="left")
-        ttk.Button(top, text="Add folder…", command=self.add_folder).pack(side="left", padx=4)
-        ttk.Button(top, text="Clear", command=self.clear_files).pack(side="left")
+    def dropEvent(self, e: QDropEvent):
+        urls = e.mimeData().urls()
+        paths = [u.toLocalFile() for u in urls if u.isLocalFile()]
+        self.setProperty("hover", False)
+        self.style().unpolish(self); self.style().polish(self)
+        if paths:
+            self.files_dropped.emit(paths)
 
-        list_frame = ttk.LabelFrame(self.root, text="Input files")
-        list_frame.pack(fill="both", expand=True, **pad)
-        self.listbox_frame = ttk.Frame(list_frame)
-        self.listbox_frame.pack(fill="both", expand=True, padx=4, pady=4)
-        from tkinter import Listbox, Scrollbar
-        sb = Scrollbar(self.listbox_frame, orient="vertical")
-        self.listbox = Listbox(self.listbox_frame, selectmode="extended", yscrollcommand=sb.set)
-        sb.config(command=self.listbox.yview)
-        sb.pack(side="right", fill="y")
-        self.listbox.pack(side="left", fill="both", expand=True)
-        ttk.Button(list_frame, text="Remove selected", command=self.remove_selected).pack(pady=4)
 
-        opts = ttk.LabelFrame(self.root, text="Output")
-        opts.pack(fill="x", **pad)
+class ConvertWorker(QThread):
+    progress = Signal(int, int, str)   # (current_index, total, message)
+    finished_ok = Signal(int, int, int)  # (ok, fail, skipped)
 
-        row1 = ttk.Frame(opts)
-        row1.pack(fill="x", padx=4, pady=4)
-        ttk.Label(row1, text="Format:").pack(side="left")
-        fmt_menu = ttk.Combobox(
-            row1, textvariable=self.fmt, state="readonly",
-            values=[f"{ext}  —  {desc}" for ext, desc in OUTPUT_FORMATS], width=46,
-        )
-        fmt_menu.current(0)
-        fmt_menu.pack(side="left", padx=4)
-        fmt_menu.bind("<<ComboboxSelected>>", self._on_fmt_change)
+    def __init__(self, assimp_path, files, ext, out_dir_sel, overwrite):
+        super().__init__()
+        self.assimp_path = assimp_path
+        self.files = files
+        self.ext = ext
+        self.out_dir_sel = out_dir_sel
+        self.overwrite = overwrite
 
-        row2 = ttk.Frame(opts)
-        row2.pack(fill="x", padx=4, pady=4)
-        ttk.Label(row2, text="Output dir:").pack(side="left")
-        ttk.Label(row2, textvariable=self.out_dir, foreground="#555").pack(side="left", padx=4)
-        ttk.Button(row2, text="Choose…", command=self.choose_out_dir).pack(side="left")
-        ttk.Button(row2, text="Reset to same as input", command=self.reset_out_dir).pack(side="left", padx=4)
-
-        row3 = ttk.Frame(opts)
-        row3.pack(fill="x", padx=4, pady=4)
-        ttk.Checkbutton(row3, text="Overwrite existing files", variable=self.overwrite).pack(side="left")
-
-        actions = ttk.Frame(self.root)
-        actions.pack(fill="x", **pad)
-        self.convert_btn = ttk.Button(actions, text="Convert", command=self.start_convert)
-        self.convert_btn.pack(side="left")
-        self.progress = ttk.Progressbar(actions, mode="determinate")
-        self.progress.pack(side="left", fill="x", expand=True, padx=8)
-
-        log_frame = ttk.LabelFrame(self.root, text="Log")
-        log_frame.pack(fill="both", expand=True, **pad)
-        self.log_view = ScrolledText(log_frame, height=8, state="disabled")
-        self.log_view.pack(fill="both", expand=True, padx=4, pady=4)
-
-    def _on_fmt_change(self, _):
-        sel = self.fmt.get().split("  —  ")[0]
-        self.fmt.set(sel)
-
-    def add_files(self):
-        types = [("3D mesh files", " ".join(f"*.{e}" for e in INPUT_EXTS)), ("All", "*.*")]
-        paths = filedialog.askopenfilenames(title="Pick mesh files", filetypes=types)
-        for p in paths:
-            self._add_file(p)
-
-    def add_folder(self):
-        d = filedialog.askdirectory(title="Pick a folder (scans recursively)")
-        if not d:
-            return
-        for root, _dirs, fnames in os.walk(d):
-            for n in fnames:
-                if n.lower().rsplit(".", 1)[-1] in INPUT_EXTS:
-                    self._add_file(os.path.join(root, n))
-
-    def _add_file(self, path):
-        if path not in self.files:
-            self.files.append(path)
-            self.listbox.insert(END, path)
-
-    def remove_selected(self):
-        for idx in reversed(self.listbox.curselection()):
-            del self.files[idx]
-            self.listbox.delete(idx)
-
-    def clear_files(self):
-        self.files.clear()
-        self.listbox.delete(0, END)
-
-    def choose_out_dir(self):
-        d = filedialog.askdirectory(title="Pick output directory")
-        if d:
-            self.out_dir.set(d)
-
-    def reset_out_dir(self):
-        self.out_dir.set("(same as input)")
-
-    def log(self, msg):
-        self.log_view.config(state="normal")
-        self.log_view.insert(END, msg + "\n")
-        self.log_view.see(END)
-        self.log_view.config(state="disabled")
-
-    def start_convert(self):
-        if not self.files:
-            messagebox.showinfo("Nothing to do", "Add some files first.")
-            return
-        if not self.assimp_path:
-            return
-        self.convert_btn.config(state="disabled")
-        t = threading.Thread(target=self._convert_all, daemon=True)
-        t.start()
-
-    def _convert_all(self):
-        ext = self.fmt.get().split("  —  ")[0].strip()
-        # assimp's output extension differs from its format id for gltf2
-        out_ext = "gltf" if ext == "gltf2" else ("dae" if ext == "collada" else ext)
-        out_dir_sel = self.out_dir.get()
+    def run(self):
+        out_ext = "gltf" if self.ext == "gltf2" else ("dae" if self.ext == "collada" else self.ext)
         total = len(self.files)
-        self.progress.config(maximum=total, value=0)
         ok = fail = skipped = 0
         for i, src in enumerate(self.files, 1):
             src_path = Path(src)
-            if out_dir_sel == "(same as input)":
-                dst = src_path.with_suffix(f".{out_ext}")
+            if self.out_dir_sel:
+                dst = Path(self.out_dir_sel) / (src_path.stem + f".{out_ext}")
             else:
-                dst = Path(out_dir_sel) / (src_path.stem + f".{out_ext}")
-            if dst.exists() and not self.overwrite.get():
-                self.log(f"[{i}/{total}] skip (exists): {dst.name}")
+                dst = src_path.with_suffix(f".{out_ext}")
+            if dst.exists() and not self.overwrite:
+                self.progress.emit(i, total, f"skip (exists): {dst.name}")
                 skipped += 1
-                self.progress.config(value=i)
                 continue
             try:
                 proc = subprocess.run(
-                    [self.assimp_path, "export", str(src_path), str(dst), "-f", ext],
+                    [self.assimp_path, "export", str(src_path), str(dst), "-f", self.ext],
                     capture_output=True, text=True, timeout=600,
                 )
                 if proc.returncode == 0 and dst.exists():
-                    self.log(f"[{i}/{total}] ✓ {src_path.name} → {dst.name}")
+                    self.progress.emit(i, total, f"✓ {src_path.name} → {dst.name}")
                     ok += 1
                 else:
-                    err = (proc.stderr or proc.stdout or "unknown").strip().splitlines()[-1]
-                    self.log(f"[{i}/{total}] ✗ {src_path.name}: {err}")
+                    tail = (proc.stderr or proc.stdout or "unknown").strip().splitlines()
+                    err = tail[-1] if tail else "unknown error"
+                    self.progress.emit(i, total, f"✗ {src_path.name}: {err}")
                     fail += 1
             except Exception as e:
-                self.log(f"[{i}/{total}] ✗ {src_path.name}: {e}")
+                self.progress.emit(i, total, f"✗ {src_path.name}: {e}")
                 fail += 1
-            self.progress.config(value=i)
-        self.log(f"Done. ok={ok}  failed={fail}  skipped={skipped}")
-        self.convert_btn.config(state="normal")
+        self.finished_ok.emit(ok, fail, skipped)
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Mesh Converter")
+        self.resize(820, 660)
+        self.assimp_path = find_assimp()
+        self.files = []
+        self.out_dir_sel = ""
+        self.worker = None
+        self._build_ui()
+        if self.assimp_path:
+            self._log(f"assimp: {self.assimp_path}")
+        else:
+            self._log("⚠ assimp not found on PATH. Install it:  brew install assimp")
+            self.convert_btn.setEnabled(False)
+
+    def _build_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(18, 18, 18, 18)
+        root.setSpacing(12)
+
+        title = QLabel("Mesh Converter")
+        tf = QFont(); tf.setPointSize(20); tf.setBold(True)
+        title.setFont(tf)
+        sub = QLabel("Batch-convert 3D mesh files (FBX → OBJ and more) via assimp.")
+        sub.setStyleSheet("color: #777;")
+        root.addWidget(title)
+        root.addWidget(sub)
+
+        self.drop = DropZone()
+        self.drop.files_dropped.connect(self._on_dropped)
+        root.addWidget(self.drop)
+
+        # File list with header
+        list_header = QHBoxLayout()
+        self.file_count_label = QLabel("Files: 0")
+        list_header.addWidget(self.file_count_label)
+        list_header.addStretch()
+        clear_btn = QPushButton("Clear")
+        clear_btn.clicked.connect(self._clear)
+        remove_btn = QPushButton("Remove selected")
+        remove_btn.clicked.connect(self._remove_selected)
+        list_header.addWidget(remove_btn)
+        list_header.addWidget(clear_btn)
+        root.addLayout(list_header)
+
+        self.list_widget = QListWidget()
+        self.list_widget.setSelectionMode(QListWidget.ExtendedSelection)
+        self.list_widget.setMinimumHeight(130)
+        root.addWidget(self.list_widget)
+
+        # Output controls
+        out_row = QHBoxLayout()
+        out_row.addWidget(QLabel("Output format:"))
+        self.fmt_combo = QComboBox()
+        for ext, desc in OUTPUT_FORMATS:
+            self.fmt_combo.addItem(f"{ext}  —  {desc}", userData=ext)
+        out_row.addWidget(self.fmt_combo, 1)
+        root.addLayout(out_row)
+
+        out_row2 = QHBoxLayout()
+        out_row2.addWidget(QLabel("Output dir:"))
+        self.out_dir_label = QLabel("(same folder as each input)")
+        self.out_dir_label.setStyleSheet("color: #777;")
+        out_row2.addWidget(self.out_dir_label, 1)
+        choose_btn = QPushButton("Choose…")
+        choose_btn.clicked.connect(self._choose_out_dir)
+        reset_btn = QPushButton("Reset")
+        reset_btn.clicked.connect(self._reset_out_dir)
+        out_row2.addWidget(choose_btn)
+        out_row2.addWidget(reset_btn)
+        root.addLayout(out_row2)
+
+        self.overwrite_check = QCheckBox("Overwrite existing output files")
+        root.addWidget(self.overwrite_check)
+
+        # Convert
+        action_row = QHBoxLayout()
+        self.convert_btn = QPushButton("Convert")
+        cf = QFont(); cf.setPointSize(14); cf.setBold(True)
+        self.convert_btn.setFont(cf)
+        self.convert_btn.setMinimumHeight(40)
+        self.convert_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.convert_btn.clicked.connect(self._start_convert)
+        action_row.addWidget(self.convert_btn)
+        root.addLayout(action_row)
+
+        self.progress = QProgressBar()
+        self.progress.setValue(0)
+        root.addWidget(self.progress)
+
+        log_label = QLabel("Log")
+        log_label.setStyleSheet("color: #777;")
+        root.addWidget(log_label)
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumHeight(140)
+        root.addWidget(self.log_view)
+
+    # ----- handlers -----
+
+    def _on_dropped(self, paths):
+        if not paths:
+            # Empty list signals "click to browse" from DropZone
+            self._add_files_dialog()
+            return
+        for p in paths:
+            if os.path.isdir(p):
+                for r, _d, fs in os.walk(p):
+                    for n in fs:
+                        if n.lower().rsplit(".", 1)[-1] in INPUT_EXTS:
+                            self._add_file(os.path.join(r, n))
+            elif os.path.isfile(p):
+                ext = p.lower().rsplit(".", 1)[-1]
+                if ext in INPUT_EXTS:
+                    self._add_file(p)
+                else:
+                    self._log(f"skip (unsupported): {os.path.basename(p)}")
+
+    def _add_files_dialog(self):
+        types = "3D meshes (" + " ".join(f"*.{e}" for e in INPUT_EXTS) + ");;All (*)"
+        paths, _ = QFileDialog.getOpenFileNames(self, "Pick mesh files", "", types)
+        for p in paths:
+            self._add_file(p)
+
+    def _add_file(self, p):
+        if p not in self.files:
+            self.files.append(p)
+            self.list_widget.addItem(p)
+            self.file_count_label.setText(f"Files: {len(self.files)}")
+
+    def _remove_selected(self):
+        for item in self.list_widget.selectedItems():
+            row = self.list_widget.row(item)
+            self.list_widget.takeItem(row)
+            del self.files[row]
+        self.file_count_label.setText(f"Files: {len(self.files)}")
+
+    def _clear(self):
+        self.files.clear()
+        self.list_widget.clear()
+        self.file_count_label.setText("Files: 0")
+
+    def _choose_out_dir(self):
+        d = QFileDialog.getExistingDirectory(self, "Output directory")
+        if d:
+            self.out_dir_sel = d
+            self.out_dir_label.setText(d)
+
+    def _reset_out_dir(self):
+        self.out_dir_sel = ""
+        self.out_dir_label.setText("(same folder as each input)")
+
+    def _log(self, msg):
+        self.log_view.appendPlainText(msg)
+
+    def _start_convert(self):
+        if not self.files:
+            QMessageBox.information(self, "Nothing to do", "Add files first (drag in or click the drop zone).")
+            return
+        if not self.assimp_path:
+            return
+        ext = self.fmt_combo.currentData()
+        self.convert_btn.setEnabled(False)
+        self.progress.setMaximum(len(self.files))
+        self.progress.setValue(0)
+        self.worker = ConvertWorker(
+            self.assimp_path, list(self.files), ext, self.out_dir_sel, self.overwrite_check.isChecked()
+        )
+        self.worker.progress.connect(self._on_worker_progress)
+        self.worker.finished_ok.connect(self._on_worker_done)
+        self.worker.start()
+
+    def _on_worker_progress(self, i, total, msg):
+        self._log(f"[{i}/{total}] {msg}")
+        self.progress.setValue(i)
+
+    def _on_worker_done(self, ok, fail, skipped):
+        self._log(f"Done. ok={ok}  failed={fail}  skipped={skipped}")
+        self.convert_btn.setEnabled(True)
 
 
 def main():
-    root = Tk()
-    App(root)
-    root.mainloop()
+    app = QApplication(sys.argv)
+    win = MainWindow()
+    win.show()
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":

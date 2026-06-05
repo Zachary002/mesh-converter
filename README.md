@@ -24,7 +24,7 @@ If you specifically need `.vox` voxel output, see the *Voxel output* section at 
 - Click **Convert**. Each file is processed via `assimp export`. Errors and successes show in the log; overall progress shows in a bar.
 - "Overwrite" toggle — by default it skips files whose output already exists.
 
-No telemetry, no network, ~250 lines of pure stdlib Python (Tkinter).
+No telemetry, no network. ~300 lines of Python with [PySide6 (Qt 6)](https://doc.qt.io/qtforpython-6/) for the UI — modern, native-looking, real Finder drag-and-drop.
 
 ---
 
@@ -32,15 +32,9 @@ No telemetry, no network, ~250 lines of pure stdlib Python (Tkinter).
 
 | Dependency | macOS | Linux | Windows |
 |---|---|---|---|
-| Python 3.8+ with Tkinter | system Python 3 already has it (`/usr/bin/python3`); Homebrew's may not — see "Tkinter" below | `apt install python3-tk` (Debian/Ubuntu) | bundled with the official python.org installer |
+| Python 3.9+ | system Python or `brew install python` | distro package | [python.org installer](https://www.python.org/downloads/) |
+| `pip install PySide6` | works on Apple Silicon + Intel | x86_64 / arm64 wheels available | works |
 | `assimp` CLI on `PATH` | `brew install assimp` | `apt install assimp-utils` or build from source | [download a release](https://github.com/assimp/assimp/releases) |
-
-### Tkinter on macOS
-
-If `python3 -c "import tkinter"` fails on your Homebrew Python, either:
-
-- Use the macOS system Python: `/usr/bin/python3 mesh_converter.py` (always has Tk), **or**
-- Install the matching Tk for your Homebrew Python, e.g. `brew install python-tk@3.12`.
 
 ---
 
@@ -63,9 +57,9 @@ The prebuilt is **macOS arm64 only** (Apple Silicon). Intel Macs / Linux / Windo
 git clone https://github.com/Zachary002/mesh-converter.git
 cd mesh-converter
 brew install assimp                       # if you don't have it yet (macOS)
-/usr/bin/python3 mesh_converter.py        # macOS — uses system Python so Tk is guaranteed
-# or, if your `python3` has Tk:
-python3 mesh_converter.py
+python3 -m venv .venv && source .venv/bin/activate
+pip install PySide6
+python mesh_converter.py
 ```
 
 A window opens. That's it.
@@ -73,11 +67,10 @@ A window opens. That's it.
 ### Building the .app yourself
 
 ```sh
-/usr/bin/python3 -m venv .venv-build
-source .venv-build/bin/activate
-pip install pyinstaller
+python3 -m venv .venv-build && source .venv-build/bin/activate
+pip install PySide6 pyinstaller
 pyinstaller --noconfirm --windowed --name "Mesh Converter" mesh_converter.py
-# result: dist/Mesh Converter.app
+# result: dist/Mesh Converter.app   (~90MB, Qt is heavy)
 ```
 
 ---
@@ -141,11 +134,11 @@ MIT — see [LICENSE](LICENSE).
 - 点 **Convert** 一键批量转换；带进度条和日志
 - "Overwrite" 开关 —— 默认跳过已存在的输出
 
-底层是 [assimp](https://github.com/assimp/assimp)，跨平台、格式覆盖广。代码只有约 250 行纯标准库 Python（Tkinter），无第三方依赖、无网络请求。
+底层是 [assimp](https://github.com/assimp/assimp)，跨平台、格式覆盖广。UI 用 PySide6（Qt 6 的 Python 绑定），约 300 行代码，原生 mac 风格、支持从 Finder 直接拖文件进窗口。无遥测、无网络请求。
 
 ## 依赖
 
-- **Python 3.8+ 且带 Tkinter**：mac 系统自带的 `/usr/bin/python3` 一定带，Homebrew 的 python 不一定带（必要时 `brew install python-tk@3.x`）
+- **Python 3.9+** + `pip install PySide6`
 - **assimp**：`brew install assimp`（mac）/ `apt install assimp-utils`（Debian/Ubuntu）/ [Windows release](https://github.com/assimp/assimp/releases)
 
 ## 安装运行
@@ -165,7 +158,9 @@ MIT — see [LICENSE](LICENSE).
 git clone https://github.com/Zachary002/mesh-converter.git
 cd mesh-converter
 brew install assimp
-/usr/bin/python3 mesh_converter.py
+python3 -m venv .venv && source .venv/bin/activate
+pip install PySide6
+python mesh_converter.py
 ```
 
 ## 不想用 GUI？直接命令行
