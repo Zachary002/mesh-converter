@@ -12,7 +12,7 @@ from PySide6.QtGui import QFont, QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QFrame, QListWidget, QComboBox, QCheckBox, QFileDialog, QProgressBar,
-    QPlainTextEdit, QMessageBox, QSizePolicy,
+    QPlainTextEdit, QMessageBox, QSizePolicy, QDoubleSpinBox,
 )
 
 OUTPUT_FORMATS = [
@@ -24,6 +24,7 @@ OUTPUT_FORMATS = [
     ("collada", "DAE (Collada)"),
     ("x3d", "X3D"),
     ("3ds", "3DS"),
+    ("vox", "VOX — MagicaVoxel voxel (needs vengi-voxconvert)"),
 ]
 
 INPUT_EXTS = ("fbx", "obj", "stl", "ply", "gltf", "glb", "dae", "3ds", "x3d", "blend")
@@ -34,6 +35,23 @@ def find_assimp():
     if found:
         return found
     for p in ("/opt/homebrew/bin/assimp", "/usr/local/bin/assimp", "/usr/bin/assimp"):
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def find_vengi():
+    found = shutil.which("vengi-voxconvert")
+    if found:
+        return found
+    home = os.path.expanduser("~")
+    candidates = [
+        f"{home}/Applications/vengi/vengi-voxconvert.app/Contents/MacOS/vengi-voxconvert",
+        "/Applications/vengi/vengi-voxconvert.app/Contents/MacOS/vengi-voxconvert",
+        f"{home}/Applications/vengi-voxconvert.app/Contents/MacOS/vengi-voxconvert",
+        "/Applications/vengi-voxconvert.app/Contents/MacOS/vengi-voxconvert",
+    ]
+    for p in candidates:
         if os.path.exists(p):
             return p
     return None
@@ -100,13 +118,15 @@ class ConvertWorker(QThread):
     progress = Signal(int, int, str)   # (current_index, total, message)
     finished_ok = Signal(int, int, int)  # (ok, fail, skipped)
 
-    def __init__(self, assimp_path, files, ext, out_dir_sel, overwrite):
+    def __init__(self, assimp_path, vengi_path, files, ext, out_dir_sel, overwrite, vox_scale):
         super().__init__()
         self.assimp_path = assimp_path
+        self.vengi_path = vengi_path
         self.files = files
         self.ext = ext
         self.out_dir_sel = out_dir_sel
         self.overwrite = overwrite
+        self.vox_scale = vox_scale
 
     def run(self):
         out_ext = "gltf" if self.ext == "gltf2" else ("dae" if self.ext == "collada" else self.ext)
@@ -122,11 +142,18 @@ class ConvertWorker(QThread):
                 self.progress.emit(i, total, f"skip (exists): {dst.name}")
                 skipped += 1
                 continue
+            if self.ext == "vox":
+                cmd = [
+                    self.vengi_path,
+                    "-set", "voxformat_voxelizemode", "1",
+                    "-set", "voxformat_scale", str(self.vox_scale),
+                    "--input", str(src_path),
+                    "--output", str(dst),
+                ]
+            else:
+                cmd = [self.assimp_path, "export", str(src_path), str(dst), "-f", self.ext]
             try:
-                proc = subprocess.run(
-                    [self.assimp_path, "export", str(src_path), str(dst), "-f", self.ext],
-                    capture_output=True, text=True, timeout=600,
-                )
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
                 if proc.returncode == 0 and dst.exists():
                     self.progress.emit(i, total, f"✓ {src_path.name} → {dst.name}")
                     ok += 1
@@ -147,6 +174,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Mesh Converter")
         self.resize(820, 660)
         self.assimp_path = find_assimp()
+        self.vengi_path = find_vengi()
         self.files = []
         self.out_dir_sel = ""
         self.worker = None
@@ -154,8 +182,11 @@ class MainWindow(QMainWindow):
         if self.assimp_path:
             self._log(f"assimp: {self.assimp_path}")
         else:
-            self._log("⚠ assimp not found on PATH. Install it:  brew install assimp")
-            self.convert_btn.setEnabled(False)
+            self._log("⚠ assimp not found. For OBJ/STL/glTF/etc., install:  brew install assimp")
+        if self.vengi_path:
+            self._log(f"vengi-voxconvert: {self.vengi_path}")
+        else:
+            self._log("ℹ vengi-voxconvert not found (only needed for .vox output). See README.")
 
     def _build_ui(self):
         central = QWidget()
@@ -200,8 +231,27 @@ class MainWindow(QMainWindow):
         self.fmt_combo = QComboBox()
         for ext, desc in OUTPUT_FORMATS:
             self.fmt_combo.addItem(f"{ext}  —  {desc}", userData=ext)
+        self.fmt_combo.currentIndexChanged.connect(self._on_fmt_changed)
         out_row.addWidget(self.fmt_combo, 1)
         root.addLayout(out_row)
+
+        # Voxel options (shown only when vox is selected)
+        self.vox_row = QHBoxLayout()
+        self.vox_label = QLabel("Voxel scale:")
+        self.vox_spin = QDoubleSpinBox()
+        self.vox_spin.setRange(0.01, 1.0)
+        self.vox_spin.setSingleStep(0.05)
+        self.vox_spin.setDecimals(2)
+        self.vox_spin.setValue(0.1)
+        self.vox_hint = QLabel("smaller = fewer voxels, faster; 0.1 is a safe default")
+        self.vox_hint.setStyleSheet("color: #777;")
+        self.vox_row.addWidget(self.vox_label)
+        self.vox_row.addWidget(self.vox_spin)
+        self.vox_row.addWidget(self.vox_hint, 1)
+        self._vox_widgets = [self.vox_label, self.vox_spin, self.vox_hint]
+        for w in self._vox_widgets:
+            w.setVisible(False)
+        root.addLayout(self.vox_row)
 
         out_row2 = QHBoxLayout()
         out_row2.addWidget(QLabel("Output dir:"))
@@ -299,18 +349,34 @@ class MainWindow(QMainWindow):
     def _log(self, msg):
         self.log_view.appendPlainText(msg)
 
+    def _on_fmt_changed(self, _idx):
+        is_vox = self.fmt_combo.currentData() == "vox"
+        for w in self._vox_widgets:
+            w.setVisible(is_vox)
+
     def _start_convert(self):
         if not self.files:
             QMessageBox.information(self, "Nothing to do", "Add files first (drag in or click the drop zone).")
             return
-        if not self.assimp_path:
-            return
         ext = self.fmt_combo.currentData()
+        if ext == "vox":
+            if not self.vengi_path:
+                QMessageBox.warning(self, "vengi-voxconvert missing",
+                    "VOX output needs vengi-voxconvert.\n\n"
+                    "Download mac-vengi-voxconvert-app.zip from\n"
+                    "https://github.com/vengi-voxel/vengi/releases\n"
+                    "and place it at ~/Applications/vengi/vengi-voxconvert.app")
+                return
+        else:
+            if not self.assimp_path:
+                QMessageBox.warning(self, "assimp missing", "Install assimp first:  brew install assimp")
+                return
         self.convert_btn.setEnabled(False)
         self.progress.setMaximum(len(self.files))
         self.progress.setValue(0)
         self.worker = ConvertWorker(
-            self.assimp_path, list(self.files), ext, self.out_dir_sel, self.overwrite_check.isChecked()
+            self.assimp_path, self.vengi_path, list(self.files), ext, self.out_dir_sel,
+            self.overwrite_check.isChecked(), self.vox_spin.value(),
         )
         self.worker.progress.connect(self._on_worker_progress)
         self.worker.finished_ok.connect(self._on_worker_done)

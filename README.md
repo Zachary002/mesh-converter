@@ -19,10 +19,11 @@ If you specifically need `.vox` voxel output, see the *Voxel output* section at 
 ## What it does
 
 - Add files one-by-one, or drop a whole folder (recursive scan).
-- Pick an output format from the dropdown (OBJ, glTF 2.0, STL, PLY, FBX, DAE, X3D, 3DS).
+- Pick an output format from the dropdown: **OBJ, glTF 2.0, STL, PLY, FBX, DAE, X3D, 3DS** (via assimp) **or VOX** (MagicaVoxel voxel, via vengi-voxconvert).
 - Pick an output directory, or leave it as "same as input" to put `.obj` next to each `.fbx`.
-- Click **Convert**. Each file is processed via `assimp export`. Errors and successes show in the log; overall progress shows in a bar.
+- Click **Convert**. Each file is processed via the right backend (assimp for mesh formats, vengi-voxconvert for `.vox`). Errors and successes show in the log; overall progress shows in a bar.
 - "Overwrite" toggle — by default it skips files whose output already exists.
+- When VOX is selected, a "Voxel scale" spinner appears (default `0.1`; smaller = fewer voxels and much faster — large meshes can OOM at scale 1.0).
 
 No telemetry, no network. ~300 lines of Python with [PySide6 (Qt 6)](https://doc.qt.io/qtforpython-6/) for the UI — modern, native-looking, real Finder drag-and-drop.
 
@@ -34,7 +35,8 @@ No telemetry, no network. ~300 lines of Python with [PySide6 (Qt 6)](https://doc
 |---|---|---|---|
 | Python 3.9+ | system Python or `brew install python` | distro package | [python.org installer](https://www.python.org/downloads/) |
 | `pip install PySide6` | works on Apple Silicon + Intel | x86_64 / arm64 wheels available | works |
-| `assimp` CLI on `PATH` | `brew install assimp` | `apt install assimp-utils` or build from source | [download a release](https://github.com/assimp/assimp/releases) |
+| `assimp` CLI on `PATH` *(for mesh outputs)* | `brew install assimp` | `apt install assimp-utils` or build from source | [download a release](https://github.com/assimp/assimp/releases) |
+| `vengi-voxconvert` *(only for `.vox` output)* | download `mac-vengi-voxconvert-app.zip` from [vengi releases](https://github.com/vengi-voxel/vengi/releases) and place at `~/Applications/vengi/vengi-voxconvert.app` | [Linux release](https://github.com/vengi-voxel/vengi/releases) | [Windows release](https://github.com/vengi-voxel/vengi/releases) |
 
 ---
 
@@ -101,18 +103,24 @@ done
 
 ## Voxel (`.vox`) output
 
-`assimp` does **not** produce voxel `.vox` files (it's a mesh library). If you need MagicaVoxel-compatible `.vox`, use [vengi-voxconvert](https://github.com/vengi-voxel/vengi/releases) — it has a native macOS arm64 build and accepts FBX/OBJ/glTF as input:
+`assimp` does not produce voxel `.vox` files (it's a mesh library), so this app shells out to [vengi-voxconvert](https://github.com/vengi-voxel/vengi/releases) when you pick **VOX** in the dropdown.
+
+To enable it once:
+
+1. Download `mac-vengi-voxconvert-app.zip` from [vengi releases](https://github.com/vengi-voxel/vengi/releases).
+2. Unzip — you get a bare `Contents/` folder. Move it to `~/Applications/vengi/vengi-voxconvert.app/Contents/` (wrap it in an `.app` directory).
+3. `chmod -R u+w ~/Applications/vengi/vengi-voxconvert.app && xattr -cr ~/Applications/vengi/vengi-voxconvert.app`
+
+Mesh Converter auto-detects this path on startup; you'll see `vengi-voxconvert: /…` in the log.
+
+The CLI it ends up running is just:
 
 ```sh
-# install (no Homebrew formula; download mac-vengi-voxconvert-app.zip from releases)
-VC=~/Applications/vengi/vengi-voxconvert.app/Contents/MacOS/vengi-voxconvert
-"$VC" -set voxformat_voxelizemode 1 -set voxformat_scale 0.1 \
-      --input model.fbx --output model.vox
+vengi-voxconvert -set voxformat_voxelizemode 1 -set voxformat_scale 0.1 \
+                 --input model.fbx --output model.vox
 ```
 
-`voxformat_scale 0.1` is important for any mesh bigger than a few thousand units — without it, voxelization can OOM.
-
-I might bake `.vox` support into this GUI later. Issues / PRs welcome.
+`voxformat_scale` is the spinner in the UI. For any mesh bigger than a few thousand units, keep it ≤ 0.1 — full-size voxelization can OOM.
 
 ---
 
@@ -175,9 +183,17 @@ for f in /某目录/*.fbx; do
 done
 ```
 
-## 需要 `.vox` 体素输出？
+## 关于 `.vox` 体素输出
 
-assimp 不输出体素格式。用 [vengi-voxconvert](https://github.com/vengi-voxel/vengi/releases)（mac arm64 原生），命令在英文版本里。后续可能把 .vox 输出也集成进这个 GUI。
+下拉框里选 **VOX** 时会自动切到 [vengi-voxconvert](https://github.com/vengi-voxel/vengi/releases)。第一次需要装一下：
+
+1. 从 [vengi releases](https://github.com/vengi-voxel/vengi/releases) 下载 `mac-vengi-voxconvert-app.zip`
+2. 解压后得到一个 `Contents/` 文件夹，把它放到 `~/Applications/vengi/vengi-voxconvert.app/Contents/` 里（自己包一层 `.app` 目录）
+3. `chmod -R u+w ~/Applications/vengi/vengi-voxconvert.app && xattr -cr ~/Applications/vengi/vengi-voxconvert.app`
+
+启动 Mesh Converter 后日志区会显示 `vengi-voxconvert: /…` 表示找到了。
+
+选 VOX 时下面会出现 "Voxel scale" 微调器（默认 0.1）。大模型必须保持在 0.1 左右，否则会 OOM。
 
 ## License
 
